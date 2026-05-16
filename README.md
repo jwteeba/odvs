@@ -68,22 +68,6 @@ Without ODVS, teams typically manage datasets through ad-hoc file naming convent
 
 ### Prerequisites
 
-| Requirement | Version | Notes |
-|---|---|---|
-| Python | 3.11+ | 3.10 also works |
-| Java | 17 (JDK) | Required by PySpark; `JAVA_HOME` must be set |
-| Docker + Compose | 24+ | For local MinIO stack |
-| Git | Any | |
-
-Verify Java before anything else:
-
-```bash
-java -version
-# openjdk version "17.x.x" ← must be 11 or 17
-echo $JAVA_HOME
-# /usr/lib/jvm/java-17-openjdk-amd64  ← must be set
-```
-
 ---
 
 ### Option A — Docker (Recommended, Zero-Config)
@@ -95,8 +79,7 @@ The fastest path. Spins up MinIO, Spark, ODVS pipeline, and Streamlit in one com
 git clone https://github.com/odvs/odvs.git
 cd odvs
 
-# 2. Copy environment file
-cp .env.example .env        # Edit credentials if needed (defaults work for local dev)
+# 2. Edit credentials if needed (defaults work for local dev)
 
 # 3. Start the full stack
 docker compose -f docker/docker-compose.yml up -d
@@ -105,7 +88,12 @@ docker compose -f docker/docker-compose.yml up -d
 docker compose -f docker/docker-compose.yml ps
 
 # 5. Run the demo pipeline (ingests cafe_sales.csv → Iceberg → Registry)
-docker compose -f docker/docker-compose.yml run --rm odvs-pipeline
+docker compose -f docker/docker-compose.yml run --rm odvs-pipeline \
+  python src/odvs/scripts/run_pipeline.py \
+  --source examples/cafe_sales.csv \
+  --dataset-name "Cafe Sales" \
+  --version-tag v1.0.0 \
+  --compression zstd
 
 # 6. Open the Streamlit UI
 open http://localhost:8501
@@ -199,13 +187,13 @@ python scripts/run_pipeline.py \
 
 ```bash
 # Basic CSV ingest
-python scripts/run_pipeline.py \
+python src/odvs/scripts/run_pipeline.py \
   --source examples/cafe_sales.csv \
   --dataset-name product_catalog \
   --version-tag v1.0.0
 
 # S3 source with partitioning
-python scripts/run_pipeline.py \
+python src/odvs/scripts/run_pipeline.py \
   --source s3://my-bucket/events/2024-06/*.parquet \
   --dataset-name user_events \
   --version-tag 2024-06 \
@@ -214,21 +202,21 @@ python scripts/run_pipeline.py \
   --compression zstd
 
 # Hugging Face Hub dataset
-python scripts/run_pipeline.py \
+python src/odvs/scripts/run_pipeline.py \
   --source hf_hub://stanfordnlp/imdb \
   --dataset-name imdb_reviews \
   --version-tag v1.0.0 \
   --tags nlp,sentiment,text
 
 # With schema validation (hard gate)
-python scripts/run_pipeline.py \
+python src/odvs/scripts/run_pipeline.py \
   --source examples/cafe_sales.csv \
   --dataset-name orders \
   --version-tag v2.0.0 \
   --schema-config examples/schema_config.json
 
 # Dry run (no Spark, no S3 write — fast validation)
-python scripts/run_pipeline.py \
+python src/odvs/scripts/run_pipeline.py \
   --source examples/cafe_sales.csv \
   --dataset-name orders \
   --version-tag v1.0.0 \
@@ -280,7 +268,7 @@ Step 12  hf_simulation      Generate Hub metadata, simulate push_to_hub()
 
 ```bash
 # Create a table from a schema file
-python scripts/create_table.py \
+python ssrc/odvs/scripts/create_table.py \
   --table-name user_events \
   --schema-file examples/schema_config.json \
   --partition-by event_date \
@@ -288,27 +276,27 @@ python scripts/create_table.py \
   --comment "User interaction events"
 
 # Inline column definitions
-python scripts/create_table.py \
+python src/odvs/scripts/create_table.py \
   --table-name products \
   --columns product_id:string name:string price:double category:string \
   --partition-by category
 
 # Add a column (schema evolution — no data rewrite)
-python scripts/create_table.py \
+python src/odvs/scripts/create_table.py \
   --table-name user_events \
   --add-column session_duration_ms long
 
 # Inspect table metadata and snapshot history
-python scripts/create_table.py --table-name user_events --info
+python src/odvs/scripts/create_table.py --table-name user_events --info
 
 # List all tables
-python scripts/create_table.py --table-name any --list
+python src/odvs/scripts/create_table.py --table-name any --list
 
 # Drop table (metadata only)
-python scripts/create_table.py --table-name user_events --drop
+python src/odvs/scripts/create_table.py --table-name user_events --drop
 
 # Drop table + purge data files from S3
-python scripts/create_table.py --table-name user_events --drop --purge --yes
+python src/odvs/scripts/create_table.py --table-name user_events --drop --purge --yes
 ```
 
 ---
@@ -319,36 +307,36 @@ python scripts/create_table.py --table-name user_events --drop --purge --yes
 
 ```bash
 # List all datasets
-python scripts/register_dataset.py list
+python src/odvs/scripts/register_dataset.py  list
 
 # Detailed dataset info
-python scripts/register_dataset.py info --dataset ecommerce_events
+python src/odvs/scripts/register_dataset.py  info --dataset ecommerce_events
 
 # Version history
-python scripts/register_dataset.py versions --dataset ecommerce_events
+python src/odvs/scripts/register_dataset.py  versions --dataset ecommerce_events
 
 # Full lineage graph + provenance
-python scripts/register_dataset.py lineage --dataset ecommerce_events
-python scripts/register_dataset.py lineage --dataset ecommerce_events --json
+python src/odvs/scripts/register_dataset.py  lineage --dataset ecommerce_events
+python src/odvs/scripts/register_dataset.py  lineage --dataset ecommerce_events --json
 
 # Generate HF Hub-style dataset card
-python scripts/register_dataset.py card --dataset ecommerce_events
-python scripts/register_dataset.py card --dataset ecommerce_events \
+python src/odvs/scripts/register_dataset.py  card --dataset ecommerce_events
+python src/odvs/scripts/register_dataset.py  card --dataset ecommerce_events \
   --output docs/ecommerce_events_card.md \
   --license apache-2.0
 
 # Search by name or tag
-python scripts/register_dataset.py search --query events
-python scripts/register_dataset.py search --tag ecommerce
+python src/odvs/scripts/register_dataset.py  search --query events
+python src/odvs/scripts/register_dataset.py  search --tag ecommerce
 
 # Registry stats
-python scripts/register_dataset.py stats
+python src/odvs/scripts/register_dataset.py  stats
 
 # Export full registry as JSON
-python scripts/register_dataset.py export --output registry_backup.json
+python src/odvs/scripts/register_dataset.py  export --output registry_backup.json
 
 # Manually register an external dataset
-python scripts/register_dataset.py register \
+python src/odvs/scripts/register_dataset.py  register \
   --dataset external_prices \
   --description "Daily commodity prices from Bloomberg" \
   --tags finance,prices,daily \
@@ -363,21 +351,21 @@ python scripts/register_dataset.py register \
 
 ```bash
 # Compression benchmark only (no Spark — fast, uses PyArrow)
-python scripts/benchmark_pipeline.py \
+python src/odvs/scripts/benchmark_pipeline.py \
   --source examples/cafe_sales.csv \
   --dataset-name ecommerce_events \
   --codecs snappy gzip zstd none \
   --sample-n 50000
 
 # Full pipeline benchmark (includes Spark + Iceberg write + read timing)
-python scripts/benchmark_pipeline.py \
+python src/odvs/scripts/benchmark_pipeline.py \
   --source examples/cafe_sales.csv \
   --dataset-name ecommerce_events \
   --full-pipeline \
   --compression zstd
 
 # Output results as JSON (for CI regression tracking)
-python scripts/benchmark_pipeline.py \
+python src/odvs/scripts/benchmark_pipeline.py \
   --source examples/cafe_sales.csv \
   --dataset-name ecommerce_events \
   --output benchmark_results.json
@@ -409,7 +397,7 @@ Start the dataset explorer:
 
 ```bash
 # Local dev
-streamlit run streamlit_app/app.py
+streamlit run src/odvs/streamlit_app/app.py
 
 # Docker
 docker compose -f docker/docker-compose.yml up -d odvs-ui

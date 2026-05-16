@@ -1089,15 +1089,15 @@ def _render_quickstart() -> None:
     st.markdown("### Quickstart")
     st.code("""
 # 1. Start MinIO (local S3)
-docker compose -f docker/docker-compose.yml up -d minio
+docker compose -f docker/docker-compose.yml up -d minio minio-init
 
 # 2. Ingest your first dataset
-python scripts/run_pipeline.py \\
-    --source examples/sample_dataset.csv \\
-    --dataset-name ecommerce_events \\
+python src/odvs/scripts/run_pipeline.py \\
+    --source examples/cafe_sales.csv \\
+    --dataset-name cafe_sales \\
     --version-tag v1.0.0 \\
-    --description "E-commerce events dataset" \\
-    --tags ecommerce,events \\
+    --description "Cafe sales dataset" \\
+    --tags cafe,sales \\
     --compression zstd
 
 # 3. Refresh this page to see your dataset
