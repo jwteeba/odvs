@@ -1,0 +1,388 @@
+# ODVS docker-compose.yml — Full local development + integration stack
+#
+# Services:
+#   minio          — S3-compatible object store (warehouse backend)
+#   minio-init     — One-shot bucket + policy bootstrap for MinIO
+#   spark-master   — Apache Spark standalone master
+#   spark-worker   — Apache Spark worker (scales horizontally)
+#   odvs-pipeline  — ODVS pipeline runner (scripts/run_pipeline.py)
+#   odvs-ui        — Streamlit dataset explorer (streamlit_app/app.py)
+#   prometheus     — Metrics scraping (JVM + Spark metrics)
+#   grafana        — Dashboards for Spark + pipeline metrics
+#
+# Usage:
+#   # Full stack (recommended for first run):
+#   docker compose up -d
+#
+#   # Storage + UI only (no Spark cluster — uses local[*] mode):
+#   docker compose up -d minio minio-init odvs-ui
+#
+#   # Run a pipeline against the running stack:
+#   docker compose run --rm odvs-pipeline \
+#     python scripts/run_pipeline.py \
+#     --source examples/cafe_sales.csv \
+#     --dataset-name demo_events \
+#     --version-tag v1.0.0
+#
+#   # Scale workers:
+#   docker compose up -d --scale spark-worker=4
+#
+# Ports:
+#   9000  — MinIO S3 API
+#   9001  — MinIO Web Console
+#   8080  — Spark Master Web UI
+#   8081  — Spark Worker Web UI
+#   8501  — ODVS Streamlit UI
+#   9090  — Prometheus
+#   3000  — Grafana
+#
+# Environment:
+#   Copy .env.example to .env and edit before starting.
+#   Secrets must NEVER be committed — .env is in .gitignore.
+
+
+# Shared env anchor — referenced by all ODVS services
+x-odvs-env: &odvs-env
+  # S3 / MinIO
+  S3_ENDPOINT_URL: http://minio:9000
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+  AWS_DEFAULT_REGION: us-east-1
+  ODVS_S3_BUCKET: ${ODVS_S3_BUCKET:-odvs-warehouse}
+  # Iceberg
+  ODVS_ICEBERG_DB: ${ODVS_ICEBERG_DB:-odvs}
+  # Registry
+  ODVS_REGISTRY_PATH: /data/registry
+  # Spark
+  SPARK_MASTER: ${SPARK_MASTER:-local[*]}
+  SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-4g}
+  SPARK_EXECUTOR_MEMORY: ${SPARK_EXECUTOR_MEMORY:-4g}
+  # ODVS runtime
+  ODVS_ENV: ${ODVS_ENV:-development}
+  ODVS_LOG_LEVEL: ${ODVS_LOG_LEVEL:-INFO}
+  ODVS_STRUCTURED_LOGS: ${ODVS_STRUCTURED_LOGS:-false}
+  # Java
+  JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+
+# Shared resource limits anchor
+x-default-resources: &default-resources
+  limits:
+    memory: 2g
+    cpus: "2.0"
+  reservations:
+    memory: 512m
+    cpus: "0.5"
+
+x-spark-resources: &spark-resources
+  limits:
+    memory: 6g
+    cpus: "4.0"
+  reservations:
+    memory: 2g
+    cpus: "1.0"
+
+# Shared logging config
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+    compress: "true"
+
+# Networks
+networks:
+  odvs-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# Volumes
+volumes:
+  minio-data:
+    driver: local
+  spark-logs:
+    driver: local
+  odvs-registry:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+# Services
+services:
+
+  # MinIO — S3-compatible object storage
+  minio:
+    image: quay.io/minio/minio:RELEASE.2024-04-28T17-53-50Z
+    container_name: odvs-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_PROMETHEUS_AUTH_TYPE: public
+      MINIO_UPDATE: "off"
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      odvs-net:
+        ipv4_address: 172.28.0.10
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+    logging: *default-logging
+
+  # MinIO Init — bucket bootstrap (runs once, then exits)
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2024-04-18T16-45-29Z
+    container_name: odvs-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - odvs-net
+    entrypoint: >
+      /bin/sh -c "
+        echo '== Waiting for MinIO...';
+        until mc alias set local http://minio:9000 $${MINIO_ROOT_USER:-minioadmin} $${MINIO_ROOT_PASSWORD:-minioadmin}; do
+          sleep 2;
+        done;
+        echo '== MinIO ready. Bootstrapping buckets...';
+
+        mc mb --ignore-existing local/$${ODVS_S3_BUCKET:-odvs-warehouse};
+        mc mb --ignore-existing local/odvs-logs;
+        mc mb --ignore-existing local/odvs-registry-backup;
+
+        mc anonymous set download local/$${ODVS_S3_BUCKET:-odvs-warehouse}/public;
+
+        mc ilm import local/$${ODVS_S3_BUCKET:-odvs-warehouse} <<EOF
+        {
+          \"Rules\": [{
+            \"ID\": \"expire-tmp\",
+            \"Status\": \"Enabled\",
+            \"Filter\": {\"Prefix\": \"tmp/\"},
+            \"Expiration\": {\"Days\": 7}
+          }]
+        }
+        EOF
+
+        echo '== MinIO bootstrap complete.';
+        mc ls local/;
+      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      ODVS_S3_BUCKET: ${ODVS_S3_BUCKET:-odvs-warehouse}
+    logging: *default-logging
+
+  # Spark Master
+  spark-master:
+    image: spark:latest
+    container_name: odvs-spark-master
+    restart: unless-stopped
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master", "--host", "spark-master", "--port", "7077", "--webui-port", "8080"]
+    environment:
+      SPARK_CONF_DIR: /opt/spark/conf
+    ports:
+      - "${SPARK_MASTER_UI_PORT:-8080}:8080"
+      - "7077:7077"
+    volumes:
+      - ./spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    networks:
+      odvs-net:
+        ipv4_address: 172.28.0.20
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources: *spark-resources
+    logging: *default-logging
+
+  # Spark Worker
+  spark-worker:
+    image: spark:latest
+    container_name: odvs-spark-worker
+    restart: unless-stopped
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077", "--memory", "4g", "--cores", "4", "--webui-port", "8081"]
+    environment:
+      SPARK_CONF_DIR: /opt/spark/conf
+    ports:
+      - "${SPARK_WORKER_UI_PORT:-8081}:8081"
+    volumes:
+      - ./spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    networks:
+      - odvs-net
+    deploy:
+      resources: *spark-resources
+    logging: *default-logging
+
+  # ODVS Pipeline Runner
+  odvs-pipeline:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: runtime
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: odvs:latest
+    container_name: odvs-pipeline
+    restart: "no"          # One-shot job — restart manually or via orchestrator
+    depends_on:
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *odvs-env
+      SPARK_MASTER: local[*]   # Use local mode unless pointing to cluster
+    volumes:
+      - ${HOME}/.odvs/registry:/data/registry
+      - ../examples:/app/examples:ro
+      - spark-logs:/tmp/spark-logs
+    networks:
+      - odvs-net
+    working_dir: /app
+    # Override CMD to run an example pipeline on `docker compose up odvs-pipeline`
+    command: >
+      python src/odvs/scripts/run_pipeline.py
+        --source examples/cafe_sales.csv
+        --dataset-name demo_events
+        --version-tag v1.0.0
+        --description "ODVS demo dataset — e-commerce events"
+        --tags demo,ecommerce,events
+        --compression zstd
+    deploy:
+      resources:
+        limits:
+          memory: 8g
+          cpus: "4.0"
+        reservations:
+          memory: 4g
+          cpus: "2.0"
+    logging: *default-logging
+
+  # ODVS Streamlit UI
+  odvs-ui:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: streamlit
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: odvs-ui:latest
+    container_name: odvs-ui
+    restart: unless-stopped
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      <<: *odvs-env
+      STREAMLIT_SERVER_PORT: 8501
+      STREAMLIT_SERVER_ADDRESS: 0.0.0.0
+      STREAMLIT_SERVER_HEADLESS: "true"
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+      STREAMLIT_SERVER_MAX_UPLOAD_SIZE: "500"
+    ports:
+      - "${ODVS_UI_PORT:-8501}:8501"
+    volumes:
+      - ${HOME}/.odvs/registry:/data/registry
+      - ../examples:/app/examples:ro
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8501/_stcore/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources: *default-resources
+    logging: *default-logging
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: odvs-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+      - "--web.enable-lifecycle"
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      odvs-net:
+        ipv4_address: 172.28.0.40
+    depends_on:
+      - minio
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.5"
+    logging: *default-logging
+
+  # Grafana
+  grafana:
+    image: grafana/grafana-oss:10.4.2
+    container_name: odvs-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-odvs_grafana}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_SERVER_ROOT_URL: http://localhost:3000
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/odvs-overview.json
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      odvs-net:
+        ipv4_address: 172.28.0.41
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+    logging: *default-logging
