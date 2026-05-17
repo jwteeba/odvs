@@ -755,7 +755,7 @@ def _render_diff_viewer(dataset_name: str, versions: List[Dict]) -> None:
                 section_header("Schema diff")
                 s = diff.schema_diff
                 if not s.has_changes:
-                    st.success("No schema changes detected.", icon="✓")
+                    st.success("No schema changes detected.", icon="✅")
                 else:
                     if s.added_columns:
                         st.markdown(f"**Added columns:** `{'`, `'.join(s.added_columns)}`")
@@ -867,7 +867,7 @@ def page_run_pipeline() -> None:
 
             if dedup_r:
                 st.markdown(
-                    f"<p style='color:#00c98d;font-size:0.82rem'>✓ Dedup removed {dedup_r.duplicates_removed:,} rows "
+                    f"<p style='color:#00c98d;font-size:0.82rem'>✅ Dedup removed {dedup_r.duplicates_removed:,} rows "
                     f"({dedup_r.deduplication_rate:.1%} duplicate rate)</p>",
                     unsafe_allow_html=True,
                 )
@@ -915,7 +915,7 @@ def page_run_pipeline() -> None:
                     )
                     st.plotly_chart(fig, use_container_width=True)
 
-                    st.success(f"✓ Recommended codec: **{comp_report.recommendation}**")
+                    st.success(f"✅ Recommended codec: **{comp_report.recommendation}**")
                     st.dataframe(bench_df, hide_index=True, use_container_width=True)
                 else:
                     st.info("Enable 'Run compression benchmark' to see codec comparison.")
