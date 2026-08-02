@@ -221,3 +221,4 @@ __marimo__/
 prometheus.yml
 spark-defaults.conf
 grafana
+.DS_Store

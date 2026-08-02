@@ -79,6 +79,7 @@ class IcebergTableManager:
 
     def table_exists(self, table_name: str, database: Optional[str] = None) -> bool:
         db = database or self._cfg.database
+        self.ensure_namespace(database=db)
         rows = self._spark.sql(f"SHOW TABLES IN {self._cfg.catalog_name}.{db}").collect()
         return any(row["tableName"] == table_name for row in rows)
 
@@ -103,8 +104,6 @@ class IcebergTableManager:
         if self.table_exists(table_name, database=db):
             logger.info(f"Table already exists, skipping creation: {full_name}")
             return full_name
-
-        self.ensure_namespace(database=db)
 
         # Build schema DDL from StructType
         schema_ddl = self._struct_to_ddl(schema)
